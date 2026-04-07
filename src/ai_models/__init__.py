@@ -6,3 +6,8 @@
 # nor does it submit to any jurisdiction.
 
 from ._version import __version__
+from .sensitivity import SensitivityManager
+from .sensitivity import SensitivityTarget
+from .sensitivity import add_sensitivity_parser_arguments
+from .sensitivity import parse_target_area
+from .sensitivity import target_slug

@@ -51,9 +51,12 @@ dependencies = [
     "gputil",
     "multiurl",
     "numpy<2",
+    "matplotlib",
     "pyyaml",
     "requests",
+    "scipy",
     "tqdm",
+    "xarray",
 ]
 
 

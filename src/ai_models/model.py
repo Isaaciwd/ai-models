@@ -21,6 +21,7 @@ import numpy as np
 from earthkit.data.utils.humanize import seconds
 from multiurl import download
 
+from .sensitivity import SensitivityManager
 from .checkpoint import peek
 from .inputs import get_input
 from .outputs import get_output
@@ -498,6 +499,17 @@ class Model:
     def parse_model_args(self, args):
         if args:
             raise NotImplementedError(f"This model does not accept arguments {args}")
+
+    def init_sensitivity(self, model_name, default_sensitivity_path):
+        manager = SensitivityManager(
+            owner=self,
+            model_name=model_name,
+            default_sensitivity_path=default_sensitivity_path,
+        )
+        manager.configure()
+        self.sensitivity_manager = manager
+        self.targets = manager.targets
+        self.current_target = manager.current_target
 
     def provenance(self):
         from .provenance import gather_provenance_info
