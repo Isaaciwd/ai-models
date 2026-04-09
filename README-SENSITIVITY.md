@@ -12,7 +12,7 @@ The goal is to keep user-facing sensitivity configuration/output/plotting logic 
 - YAML config loading and validation
 - target metadata structures
 - NetCDF and JSON output serialization
-- sensitivity plotting (including optional coastlines)
+- sensitivity plotting (including optional coastlines and signed-gradient maps)
 
 ## Plugin responsibilities
 

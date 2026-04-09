@@ -10,4 +10,5 @@ from .sensitivity import SensitivityManager
 from .sensitivity import SensitivityTarget
 from .sensitivity import add_sensitivity_parser_arguments
 from .sensitivity import parse_target_area
+from .sensitivity import signed_total_sensitivity_map
 from .sensitivity import target_slug

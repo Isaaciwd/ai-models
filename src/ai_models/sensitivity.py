@@ -6,6 +6,7 @@
 # nor does it submit to any jurisdiction.
 
 import argparse
+import datetime
 import json
 import logging
 import math
@@ -129,6 +130,12 @@ def add_sensitivity_parser_arguments(parser):
         default=True,
         help="Draw continent coastlines in sensitivity plots when cartopy is available.",
     )
+    parser.add_argument(
+        "--plot-signed-gradients",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also write signed-gradient plots with a diverging color map.",
+    )
 
 
 def _channel_maps(gradient):
@@ -145,6 +152,14 @@ def _total_sensitivity_map(gradient_maps):
     return np.abs(gradient_maps).mean(axis=0)
 
 
+def _signed_total_sensitivity_map(gradient_maps):
+    return gradient_maps.mean(axis=0)
+
+
+def signed_total_sensitivity_map(gradient_maps):
+    return _signed_total_sensitivity_map(gradient_maps)
+
+
 class SensitivityManager:
     def __init__(self, owner, model_name, default_sensitivity_path):
         self.owner = owner
@@ -158,6 +173,9 @@ class SensitivityManager:
         self._warned_missing_cartopy = False
 
     def configure(self):
+        if not hasattr(self.owner, "plot_signed_gradients"):
+            self.owner.plot_signed_gradients = False
+
         if self.owner.model_checkpointing is None:
             self.owner.model_checkpointing = self.owner.sensitivity
 
@@ -198,6 +216,12 @@ class SensitivityManager:
             lead_time = run_cfg.get("lead_time")
             if lead_time is not None:
                 self.owner.lead_time = int(lead_time)
+            model_checkpointing = run_cfg.get("model_checkpointing")
+            if model_checkpointing is not None:
+                self.owner.model_checkpointing = bool(model_checkpointing)
+            rollout_checkpointing = run_cfg.get("rollout_checkpointing")
+            if rollout_checkpointing is not None:
+                self.owner.rollout_checkpointing = bool(rollout_checkpointing)
 
         output_cfg = config.get("output", {})
         if output_cfg:
@@ -218,6 +242,10 @@ class SensitivityManager:
                 self.plot_area_bounds = parse_target_area(plotting_cfg["area"])
             if "coastlines" in plotting_cfg:
                 self.owner.plot_coastlines = bool(plotting_cfg["coastlines"])
+            if "signed_gradients" in plotting_cfg:
+                self.owner.plot_signed_gradients = bool(plotting_cfg["signed_gradients"])
+            elif "signed" in plotting_cfg:
+                self.owner.plot_signed_gradients = bool(plotting_cfg["signed"])
 
         if self.owner.plot_top_k < 0:
             raise ValueError("plotting.top_k must be non-negative")
@@ -226,7 +254,7 @@ class SensitivityManager:
             self.owner.plot_prefix = os.path.splitext(self.owner.sensitivity_path)[0]
 
         self.targets = self.owner.config_targets(config)
-        if self.plot_area_bounds is None and self.targets:
+        if self.plot_area_bounds is None and self.targets and self.targets[0] is not None:
             self.plot_area_bounds = self.targets[0].area
 
         self.current_target = self.targets[0]
@@ -277,12 +305,15 @@ class SensitivityManager:
             return None
         return self.current_target.area
 
-    def add_target_area_patch(self, axes, data_crs=None):
-        area = self.plot_area_bounds if self.plot_area_bounds is not None else self.target_area_bounds()
+    def add_target_area_patch(self, axes, data_crs=None, edgecolor="white"):
+        area = self.target_area_bounds()
+        if area is None:
+            area = self.plot_area_bounds
         if area is None:
             return
 
         import matplotlib.patches as patches
+        import matplotlib.patheffects as patheffects
 
         north, west, south, east = area
         spans = [(west, east)] if west <= east else [(west, 360.0), (0.0, east)]
@@ -291,32 +322,47 @@ class SensitivityManager:
             if data_crs is not None:
                 patch_kwargs["transform"] = data_crs
 
+            halo = "black" if edgecolor == "white" else "white"
+
             axes.add_patch(
                 patches.Rectangle(
                     (span_west, south),
                     span_east - span_west,
                     north - south,
                     fill=False,
-                    edgecolor="black",
-                    linewidth=1.5,
+                    edgecolor=edgecolor,
+                    linewidth=2.2,
                     linestyle="--",
+                    zorder=50,
+                    clip_on=False,
+                    path_effects=[
+                        patheffects.Stroke(linewidth=3.4, foreground=halo),
+                        patheffects.Normal(),
+                    ],
                     **patch_kwargs,
                 )
             )
 
-    def maybe_add_coastlines(self, axes):
+    def maybe_add_coastlines(self, axes, color="white"):
         if not self.owner.plot_coastlines:
             return
 
         try:
             import cartopy.feature as cfeature
 
-            axes.coastlines(color="black", linewidth=0.6)
-            axes.add_feature(cfeature.BORDERS, linewidth=0.3)
+            axes.coastlines(color=color, linewidth=0.6)
+            axes.add_feature(cfeature.BORDERS, edgecolor=color, linewidth=0.3)
         except Exception:
             if not self._warned_missing_cartopy:
                 LOG.warning("Cartopy is not available; plotting without coastline overlays")
                 self._warned_missing_cartopy = True
+
+    @staticmethod
+    def symmetric_limits(values):
+        vmax = float(np.nanmax(np.abs(values)))
+        if not np.isfinite(vmax) or vmax == 0:
+            vmax = 1e-12
+        return (-vmax, vmax)
 
     def apply_plot_limits(self, axes, data_crs=None):
         area = self.plot_area_bounds
@@ -336,6 +382,73 @@ class SensitivityManager:
         else:
             axes.set_xlim(0, 360)
         axes.set_ylim(south, north)
+
+    @staticmethod
+    def _coerce_datetime(date_value, time_value):
+        try:
+            date = int(date_value)
+        except (TypeError, ValueError):
+            return None
+
+        if date <= 0:
+            base = datetime.datetime.utcnow() + datetime.timedelta(days=date)
+            date = base.year * 10000 + base.month * 100 + base.day
+
+        try:
+            time = int(time_value)
+        except (TypeError, ValueError):
+            return None
+
+        if time < 100:
+            time *= 100
+
+        try:
+            return datetime.datetime(
+                date // 10000,
+                date % 10000 // 100,
+                date % 100,
+                time // 100,
+                time % 100,
+            )
+        except ValueError:
+            return None
+
+    def target_backpropagation_datetime(self):
+        try:
+            lead_hours = int(self.owner.lead_time)
+        except (TypeError, ValueError):
+            return None
+
+        try:
+            start = self.owner.start_datetime
+        except Exception:
+            start = None
+
+        if isinstance(start, datetime.datetime):
+            return start + datetime.timedelta(hours=lead_hours)
+
+        base = self._coerce_datetime(
+            getattr(self.owner, "date", None),
+            getattr(self.owner, "time", None),
+        )
+        if base is None:
+            return None
+
+        return base + datetime.timedelta(hours=lead_hours)
+
+    def plot_context_label(self):
+        parts = []
+
+        try:
+            parts.append(f"Lead time: +{int(self.owner.lead_time)}h")
+        except (TypeError, ValueError):
+            pass
+
+        backpropagation_datetime = self.target_backpropagation_datetime()
+        if backpropagation_datetime is not None:
+            parts.append(f"Backprop from: {backpropagation_datetime:%Y-%m-%d %H:%M} UTC")
+
+        return " | ".join(parts)
 
     def write_sensitivity_plots(self, gradient_maps, top_channels):
         import matplotlib
@@ -358,6 +471,8 @@ class SensitivityManager:
 
         total_map = _total_sensitivity_map(gradient_maps)
         total_path = f"{self.owner.plot_prefix}-total.png"
+        paths = []
+        context_label = self.plot_context_label()
         extent = (
             0.0,
             360.0,
@@ -378,20 +493,66 @@ class SensitivityManager:
             figure, axes = plt.subplots(figsize=(12, 5))
             image = axes.imshow(total_map, origin="upper", extent=extent, cmap="magma")
 
-        axes.set_title("Total input sensitivity")
+        if context_label:
+            axes.set_title(f"Total input sensitivity\n{context_label}")
+        else:
+            axes.set_title("Total input sensitivity")
         axes.set_xlabel("Longitude")
         axes.set_ylabel("Latitude")
-        self.maybe_add_coastlines(axes)
-        self.add_target_area_patch(axes, data_crs=data_crs)
+        self.maybe_add_coastlines(axes, color="white")
+        self.add_target_area_patch(axes, data_crs=data_crs, edgecolor="white")
         self.apply_plot_limits(axes, data_crs=data_crs)
         figure.colorbar(image, ax=axes, shrink=0.8, label="Mean absolute gradient")
         figure.tight_layout()
         figure.savefig(total_path, dpi=150)
         plt.close(figure)
+        paths.append(total_path)
+
+        if self.owner.plot_signed_gradients:
+            signed_total_map = _signed_total_sensitivity_map(gradient_maps)
+            signed_total_path = f"{self.owner.plot_prefix}-total-signed.png"
+            vmin, vmax = self.symmetric_limits(signed_total_map)
+
+            if projection is not None:
+                figure, axes = plt.subplots(figsize=(12, 5), subplot_kw={"projection": projection})
+                image = axes.imshow(
+                    signed_total_map,
+                    origin="upper",
+                    extent=extent,
+                    cmap="RdBu_r",
+                    vmin=vmin,
+                    vmax=vmax,
+                    transform=data_crs,
+                )
+            else:
+                figure, axes = plt.subplots(figsize=(12, 5))
+                image = axes.imshow(
+                    signed_total_map,
+                    origin="upper",
+                    extent=extent,
+                    cmap="RdBu_r",
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+
+            if context_label:
+                axes.set_title(f"Total input sensitivity (signed)\n{context_label}")
+            else:
+                axes.set_title("Total input sensitivity (signed)")
+            axes.set_xlabel("Longitude")
+            axes.set_ylabel("Latitude")
+            self.maybe_add_coastlines(axes, color="black")
+            self.add_target_area_patch(axes, data_crs=data_crs, edgecolor="black")
+            self.apply_plot_limits(axes, data_crs=data_crs)
+            figure.colorbar(image, ax=axes, shrink=0.8, label="Mean gradient")
+            figure.tight_layout()
+            figure.savefig(signed_total_path, dpi=150)
+            plt.close(figure)
+            paths.append(signed_total_path)
 
         top_count = min(self.owner.plot_top_k, len(top_channels))
         if top_count <= 0:
-            return [total_path]
+            return paths
 
         top_indices = [channel["index"] for channel in top_channels[:top_count]]
         columns = min(3, top_count)
@@ -406,6 +567,9 @@ class SensitivityManager:
             )
         else:
             figure, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
+
+        if context_label:
+            figure.suptitle(f"Top input sensitivity channels\n{context_label}", fontsize=12)
 
         for axis in axes.ravel()[top_count:]:
             axis.axis("off")
@@ -424,17 +588,78 @@ class SensitivityManager:
             axis.set_title(self.owner.ordering[index])
             axis.set_xlabel("Longitude")
             axis.set_ylabel("Latitude")
-            self.maybe_add_coastlines(axis)
-            self.add_target_area_patch(axis, data_crs=data_crs)
+            self.maybe_add_coastlines(axis, color="white")
+            self.add_target_area_patch(axis, data_crs=data_crs, edgecolor="white")
             self.apply_plot_limits(axis, data_crs=data_crs)
             figure.colorbar(image, ax=axis, shrink=0.8)
 
-        figure.tight_layout()
+        if context_label:
+            figure.tight_layout(rect=(0, 0, 1, 0.9))
+        else:
+            figure.tight_layout()
         top_path = f"{self.owner.plot_prefix}-top-channels.png"
         figure.savefig(top_path, dpi=150)
         plt.close(figure)
+        paths.append(top_path)
 
-        return [total_path, top_path]
+        if self.owner.plot_signed_gradients:
+            signed_top_path = f"{self.owner.plot_prefix}-top-channels-signed.png"
+            signed_vmin, signed_vmax = self.symmetric_limits(gradient_maps[top_indices])
+
+            if projection is not None:
+                figure, axes = plt.subplots(
+                    rows,
+                    columns,
+                    figsize=(5 * columns, 3.5 * rows),
+                    squeeze=False,
+                    subplot_kw={"projection": projection},
+                )
+            else:
+                figure, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
+
+            if context_label:
+                figure.suptitle(f"Top input sensitivity channels (signed)\n{context_label}", fontsize=12)
+
+            for axis in axes.ravel()[top_count:]:
+                axis.axis("off")
+
+            for axis, index in zip(axes.ravel(), top_indices):
+                if projection is not None:
+                    image = axis.imshow(
+                        gradient_maps[index],
+                        origin="upper",
+                        extent=extent,
+                        cmap="RdBu_r",
+                        vmin=signed_vmin,
+                        vmax=signed_vmax,
+                        transform=data_crs,
+                    )
+                else:
+                    image = axis.imshow(
+                        gradient_maps[index],
+                        origin="upper",
+                        extent=extent,
+                        cmap="RdBu_r",
+                        vmin=signed_vmin,
+                        vmax=signed_vmax,
+                    )
+                axis.set_title(f"{self.owner.ordering[index]} (signed)")
+                axis.set_xlabel("Longitude")
+                axis.set_ylabel("Latitude")
+                self.maybe_add_coastlines(axis, color="black")
+                self.add_target_area_patch(axis, data_crs=data_crs, edgecolor="black")
+                self.apply_plot_limits(axis, data_crs=data_crs)
+                figure.colorbar(image, ax=axis, shrink=0.8)
+
+            if context_label:
+                figure.tight_layout(rect=(0, 0, 1, 0.9))
+            else:
+                figure.tight_layout()
+            figure.savefig(signed_top_path, dpi=150)
+            plt.close(figure)
+            paths.append(signed_top_path)
+
+        return paths
 
     def write_sensitivity_netcdf(
         self,

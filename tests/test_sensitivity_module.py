@@ -1,6 +1,8 @@
 import numpy as np
 
+from ai_models.sensitivity import SensitivityManager
 from ai_models.sensitivity import parse_target_area
+from ai_models.sensitivity import signed_total_sensitivity_map
 from ai_models.sensitivity import target_slug
 
 
@@ -22,3 +24,106 @@ def test_parse_target_area_wraps_longitudes():
 
 def test_target_slug_sanitizes():
     assert target_slug("West Coast R850", "fallback") == "west-coast-r850"
+
+
+def test_signed_total_sensitivity_map_preserves_sign():
+    gradient_maps = np.array(
+        [
+            [[1.0, -3.0], [2.0, -1.0]],
+            [[-1.0, 1.0], [2.0, -3.0]],
+        ],
+        dtype=np.float32,
+    )
+    signed_map = signed_total_sensitivity_map(gradient_maps)
+    expected = np.array([[0.0, -1.0], [2.0, -2.0]], dtype=np.float32)
+    assert np.allclose(signed_map, expected)
+
+
+def test_load_config_applies_checkpointing_flags_from_run_section(tmp_path):
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+    manager.targets = [None]
+    manager.current_target = None
+
+    config_path = tmp_path / "sens.yaml"
+    config_path.write_text(
+        """
+run:
+  lead_time: 48
+  model_checkpointing: false
+  rollout_checkpointing: true
+""".strip()
+    )
+
+    manager.load_config(str(config_path))
+
+    assert owner.lead_time == 48
+    assert owner.model_checkpointing is False
+    assert owner.rollout_checkpointing is True
+
+
+def test_load_config_accepts_null_plotting_area(tmp_path):
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+    manager.targets = [None]
+    manager.current_target = None
+
+    config_path = tmp_path / "sens.yaml"
+    config_path.write_text(
+        """
+plotting:
+  area: null
+""".strip()
+    )
+
+    manager.load_config(str(config_path))
+
+    assert manager.plot_area_bounds is None
