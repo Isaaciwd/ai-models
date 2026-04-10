@@ -127,3 +127,43 @@ plotting:
     manager.load_config(str(config_path))
 
     assert manager.plot_area_bounds is None
+
+
+def test_configure_enables_sensitivity_when_config_path_is_set(tmp_path):
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_signed_gradients = False
+            self.plot_top_k = 6
+            self.sensitivity_path = None
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.lead_time = 6
+            self.sensitivity = False
+            self.sensitivity_config = None
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    config_path = tmp_path / "sens.yaml"
+    config_path.write_text("{}")
+    owner.sensitivity_config = str(config_path)
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+
+    manager.configure()
+
+    assert owner.sensitivity is True
+    assert owner.model_checkpointing is True
+    assert owner.rollout_checkpointing is True

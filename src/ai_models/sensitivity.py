@@ -176,6 +176,9 @@ class SensitivityManager:
         if not hasattr(self.owner, "plot_signed_gradients"):
             self.owner.plot_signed_gradients = False
 
+        if self.owner.sensitivity_config and not self.owner.sensitivity:
+            self.owner.sensitivity = True
+
         if self.owner.model_checkpointing is None:
             self.owner.model_checkpointing = self.owner.sensitivity
 
