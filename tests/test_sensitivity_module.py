@@ -250,3 +250,139 @@ def test_configure_rejects_invalid_plot_clip_percentile():
         assert "plot-clip-percentile" in str(exc)
     else:
         raise AssertionError("Expected ValueError for invalid clip percentile")
+
+
+def test_load_config_applies_integrated_gradients_options(tmp_path):
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_signed_gradients = False
+            self.plot_clip_percentile = 99.9
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+            self.attribution_method = "gradient"
+            self.ig_steps = 16
+            self.ig_baseline = "zero"
+            self.supported_attribution_methods = ("gradient", "integrated-gradients")
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+    manager.targets = [None]
+    manager.current_target = None
+
+    config_path = tmp_path / "sens.yaml"
+    config_path.write_text(
+        """
+run:
+  attribution_method: integrated-gradients
+  ig_steps: 24
+  ig_baseline: zero
+""".strip()
+    )
+
+    manager.load_config(str(config_path))
+
+    assert owner.attribution_method == "integrated-gradients"
+    assert owner.ig_steps == 24
+    assert owner.ig_baseline == "zero"
+
+
+def test_configure_rejects_invalid_integrated_gradients_steps():
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_signed_gradients = False
+            self.plot_clip_percentile = 99.9
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+            self.attribution_method = "integrated-gradients"
+            self.ig_steps = 0
+            self.ig_baseline = "zero"
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+
+    try:
+        manager.configure()
+    except ValueError as exc:
+        assert "ig-steps" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid ig steps")
+
+
+def test_configure_rejects_unsupported_attribution_method_for_model():
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_signed_gradients = False
+            self.plot_clip_percentile = 99.9
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+            self.attribution_method = "integrated-gradients"
+            self.ig_steps = 16
+            self.ig_baseline = "zero"
+            self.supported_attribution_methods = ("gradient",)
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+
+    try:
+        manager.configure()
+    except ValueError as exc:
+        assert "does not support attribution method" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unsupported attribution method")

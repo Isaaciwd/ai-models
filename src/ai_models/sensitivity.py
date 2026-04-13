@@ -142,6 +142,24 @@ def add_sensitivity_parser_arguments(parser):
         default=99.9,
         help="Upper percentile used to clip color scales for sensitivity plots.",
     )
+    parser.add_argument(
+        "--attribution-method",
+        choices=("gradient", "integrated-gradients"),
+        default="gradient",
+        help="Attribution algorithm used to compute input sensitivity maps.",
+    )
+    parser.add_argument(
+        "--ig-steps",
+        type=int,
+        default=16,
+        help="Number of interpolation steps for integrated gradients.",
+    )
+    parser.add_argument(
+        "--ig-baseline",
+        choices=("zero", "climatology"),
+        default="zero",
+        help="Baseline used for integrated gradients.",
+    )
 
 
 def _channel_maps(gradient):
@@ -185,6 +203,15 @@ class SensitivityManager:
         if not hasattr(self.owner, "plot_clip_percentile"):
             self.owner.plot_clip_percentile = 99.9
 
+        if not hasattr(self.owner, "attribution_method"):
+            self.owner.attribution_method = "gradient"
+
+        if not hasattr(self.owner, "ig_steps"):
+            self.owner.ig_steps = 16
+
+        if not hasattr(self.owner, "ig_baseline"):
+            self.owner.ig_baseline = "zero"
+
         if self.owner.sensitivity_config and not self.owner.sensitivity:
             self.owner.sensitivity = True
 
@@ -202,6 +229,23 @@ class SensitivityManager:
 
         if not (0.0 < float(self.owner.plot_clip_percentile) <= 100.0):
             raise ValueError("--plot-clip-percentile must be in (0, 100]")
+
+        if self.owner.ig_steps <= 0:
+            raise ValueError("--ig-steps must be a positive integer")
+
+        if self.owner.ig_baseline not in ("zero", "climatology"):
+            raise ValueError("--ig-baseline must be one of: zero, climatology")
+
+        if self.owner.attribution_method not in ("gradient", "integrated-gradients"):
+            raise ValueError("--attribution-method must be one of: gradient, integrated-gradients")
+
+        supported_methods = tuple(getattr(self.owner, "supported_attribution_methods", ("gradient",)))
+        if self.owner.attribution_method not in supported_methods:
+            supported = ", ".join(supported_methods)
+            raise ValueError(
+                f"Model '{self.model_name}' does not support attribution method "
+                f"'{self.owner.attribution_method}'. Supported methods: {supported}"
+            )
 
         if self.owner.sensitivity_path is None:
             self.owner.sensitivity_path = self.default_sensitivity_path
@@ -223,6 +267,15 @@ class SensitivityManager:
         if not hasattr(self.owner, "plot_clip_percentile"):
             self.owner.plot_clip_percentile = 99.9
 
+        if not hasattr(self.owner, "attribution_method"):
+            self.owner.attribution_method = "gradient"
+
+        if not hasattr(self.owner, "ig_steps"):
+            self.owner.ig_steps = 16
+
+        if not hasattr(self.owner, "ig_baseline"):
+            self.owner.ig_baseline = "zero"
+
         with open(path) as file_handle:
             config = yaml.safe_load(file_handle) or {}
 
@@ -240,6 +293,15 @@ class SensitivityManager:
             rollout_checkpointing = run_cfg.get("rollout_checkpointing")
             if rollout_checkpointing is not None:
                 self.owner.rollout_checkpointing = bool(rollout_checkpointing)
+            attribution_method = run_cfg.get("attribution_method")
+            if attribution_method is not None:
+                self.owner.attribution_method = str(attribution_method)
+            ig_steps = run_cfg.get("ig_steps")
+            if ig_steps is not None:
+                self.owner.ig_steps = int(ig_steps)
+            ig_baseline = run_cfg.get("ig_baseline")
+            if ig_baseline is not None:
+                self.owner.ig_baseline = str(ig_baseline)
 
         output_cfg = config.get("output", {})
         if output_cfg:
@@ -272,6 +334,23 @@ class SensitivityManager:
 
         if not (0.0 < float(self.owner.plot_clip_percentile) <= 100.0):
             raise ValueError("plotting.clip_percentile must be in (0, 100]")
+
+        if self.owner.ig_steps <= 0:
+            raise ValueError("run.ig_steps must be a positive integer")
+
+        if self.owner.ig_baseline not in ("zero", "climatology"):
+            raise ValueError("run.ig_baseline must be one of: zero, climatology")
+
+        if self.owner.attribution_method not in ("gradient", "integrated-gradients"):
+            raise ValueError("run.attribution_method must be one of: gradient, integrated-gradients")
+
+        supported_methods = tuple(getattr(self.owner, "supported_attribution_methods", ("gradient",)))
+        if self.owner.attribution_method not in supported_methods:
+            supported = ", ".join(supported_methods)
+            raise ValueError(
+                f"Model '{self.model_name}' does not support attribution method "
+                f"'{self.owner.attribution_method}'. Supported methods: {supported}"
+            )
 
         if self.owner.plot_prefix is None:
             self.owner.plot_prefix = os.path.splitext(self.owner.sensitivity_path)[0]
@@ -493,6 +572,17 @@ class SensitivityManager:
 
         return " | ".join(parts)
 
+    def attribution_label(self):
+        method = str(getattr(self.owner, "attribution_method", "gradient")).strip().lower()
+        labels = {
+            "gradient": "Gradient",
+            "integrated-gradients": "Integrated gradients",
+        }
+        return labels.get(method, method)
+
+    def plot_header_label(self):
+        return f"Model: {self.model_name} | Attribution: {self.attribution_label()}"
+
     def write_sensitivity_plots(self, gradient_maps, top_channels):
         import matplotlib
 
@@ -516,6 +606,7 @@ class SensitivityManager:
         total_path = f"{self.owner.plot_prefix}-total.png"
         paths = []
         context_label = self.plot_context_label()
+        header_label = self.plot_header_label()
         extent = (
             0.0,
             360.0,
@@ -546,9 +637,9 @@ class SensitivityManager:
             )
 
         if context_label:
-            axes.set_title(f"Total input sensitivity\n{context_label}")
+            axes.set_title(f"Total input sensitivity\n{header_label} | {context_label}")
         else:
-            axes.set_title("Total input sensitivity")
+            axes.set_title(f"Total input sensitivity\n{header_label}")
         axes.set_xlabel("Longitude")
         axes.set_ylabel("Latitude")
         self.maybe_add_coastlines(axes, color="white")
@@ -591,9 +682,9 @@ class SensitivityManager:
                 )
 
             if context_label:
-                axes.set_title(f"Total input sensitivity (signed)\n{context_label}")
+                axes.set_title(f"Total input sensitivity (signed)\n{header_label} | {context_label}")
             else:
-                axes.set_title("Total input sensitivity (signed)")
+                axes.set_title(f"Total input sensitivity (signed)\n{header_label}")
             axes.set_xlabel("Longitude")
             axes.set_ylabel("Latitude")
             self.maybe_add_coastlines(axes, color="black")
@@ -624,7 +715,9 @@ class SensitivityManager:
             figure, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
 
         if context_label:
-            figure.suptitle(f"Top input sensitivity channels\n{context_label}", fontsize=12)
+            figure.suptitle(f"Top input sensitivity channels\n{header_label} | {context_label}", fontsize=12)
+        else:
+            figure.suptitle(f"Top input sensitivity channels\n{header_label}", fontsize=12)
 
         for axis in axes.ravel()[top_count:]:
             axis.axis("off")
@@ -663,10 +756,7 @@ class SensitivityManager:
             self.apply_plot_limits(axis, data_crs=data_crs)
             figure.colorbar(image, ax=axis, shrink=0.8)
 
-        if context_label:
-            figure.tight_layout(rect=(0, 0, 1, 0.9))
-        else:
-            figure.tight_layout()
+        figure.tight_layout(rect=(0, 0, 1, 0.9))
         top_path = f"{self.owner.plot_prefix}-top-channels.png"
         figure.savefig(top_path, dpi=150)
         plt.close(figure)
@@ -691,7 +781,12 @@ class SensitivityManager:
                 figure, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
 
             if context_label:
-                figure.suptitle(f"Top input sensitivity channels (signed)\n{context_label}", fontsize=12)
+                figure.suptitle(
+                    f"Top input sensitivity channels (signed)\n{header_label} | {context_label}",
+                    fontsize=12,
+                )
+            else:
+                figure.suptitle(f"Top input sensitivity channels (signed)\n{header_label}", fontsize=12)
 
             for axis in axes.ravel()[top_count:]:
                 axis.axis("off")
@@ -724,10 +819,7 @@ class SensitivityManager:
                 self.apply_plot_limits(axis, data_crs=data_crs)
                 figure.colorbar(image, ax=axis, shrink=0.8)
 
-            if context_label:
-                figure.tight_layout(rect=(0, 0, 1, 0.9))
-            else:
-                figure.tight_layout()
+            figure.tight_layout(rect=(0, 0, 1, 0.9))
             figure.savefig(signed_top_path, dpi=150)
             plt.close(figure)
             paths.append(signed_top_path)
