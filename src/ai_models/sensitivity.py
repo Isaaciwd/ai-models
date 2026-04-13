@@ -136,6 +136,12 @@ def add_sensitivity_parser_arguments(parser):
         default=False,
         help="Also write signed-gradient plots with a diverging color map.",
     )
+    parser.add_argument(
+        "--plot-clip-percentile",
+        type=float,
+        default=99.9,
+        help="Upper percentile used to clip color scales for sensitivity plots.",
+    )
 
 
 def _channel_maps(gradient):
@@ -176,6 +182,9 @@ class SensitivityManager:
         if not hasattr(self.owner, "plot_signed_gradients"):
             self.owner.plot_signed_gradients = False
 
+        if not hasattr(self.owner, "plot_clip_percentile"):
+            self.owner.plot_clip_percentile = 99.9
+
         if self.owner.sensitivity_config and not self.owner.sensitivity:
             self.owner.sensitivity = True
 
@@ -190,6 +199,9 @@ class SensitivityManager:
 
         if self.owner.plot_top_k < 0:
             raise ValueError("--plot-top-k must be non-negative")
+
+        if not (0.0 < float(self.owner.plot_clip_percentile) <= 100.0):
+            raise ValueError("--plot-clip-percentile must be in (0, 100]")
 
         if self.owner.sensitivity_path is None:
             self.owner.sensitivity_path = self.default_sensitivity_path
@@ -208,6 +220,9 @@ class SensitivityManager:
             self.load_config(self.owner.sensitivity_config)
 
     def load_config(self, path):
+        if not hasattr(self.owner, "plot_clip_percentile"):
+            self.owner.plot_clip_percentile = 99.9
+
         with open(path) as file_handle:
             config = yaml.safe_load(file_handle) or {}
 
@@ -249,9 +264,14 @@ class SensitivityManager:
                 self.owner.plot_signed_gradients = bool(plotting_cfg["signed_gradients"])
             elif "signed" in plotting_cfg:
                 self.owner.plot_signed_gradients = bool(plotting_cfg["signed"])
+            if "clip_percentile" in plotting_cfg:
+                self.owner.plot_clip_percentile = float(plotting_cfg["clip_percentile"])
 
         if self.owner.plot_top_k < 0:
             raise ValueError("plotting.top_k must be non-negative")
+
+        if not (0.0 < float(self.owner.plot_clip_percentile) <= 100.0):
+            raise ValueError("plotting.clip_percentile must be in (0, 100]")
 
         if self.owner.plot_prefix is None:
             self.owner.plot_prefix = os.path.splitext(self.owner.sensitivity_path)[0]
@@ -365,6 +385,26 @@ class SensitivityManager:
         vmax = float(np.nanmax(np.abs(values)))
         if not np.isfinite(vmax) or vmax == 0:
             vmax = 1e-12
+        return (-vmax, vmax)
+
+    @staticmethod
+    def robust_positive_limit(values, percentile):
+        finite_values = np.asarray(values, dtype=np.float64)
+        finite_values = finite_values[np.isfinite(finite_values)]
+        if finite_values.size == 0:
+            return 1e-12
+
+        vmax = float(np.nanpercentile(finite_values, percentile))
+        if not np.isfinite(vmax) or vmax <= 0:
+            vmax = float(np.nanmax(finite_values))
+
+        if not np.isfinite(vmax) or vmax <= 0:
+            vmax = 1e-12
+        return vmax
+
+    @classmethod
+    def robust_symmetric_limits(cls, values, percentile):
+        vmax = cls.robust_positive_limit(np.abs(values), percentile)
         return (-vmax, vmax)
 
     def apply_plot_limits(self, axes, data_crs=None):
@@ -490,11 +530,20 @@ class SensitivityManager:
                 origin="upper",
                 extent=extent,
                 cmap="magma",
+                vmin=0.0,
+                vmax=self.robust_positive_limit(total_map, self.owner.plot_clip_percentile),
                 transform=data_crs,
             )
         else:
             figure, axes = plt.subplots(figsize=(12, 5))
-            image = axes.imshow(total_map, origin="upper", extent=extent, cmap="magma")
+            image = axes.imshow(
+                total_map,
+                origin="upper",
+                extent=extent,
+                cmap="magma",
+                vmin=0.0,
+                vmax=self.robust_positive_limit(total_map, self.owner.plot_clip_percentile),
+            )
 
         if context_label:
             axes.set_title(f"Total input sensitivity\n{context_label}")
@@ -514,7 +563,10 @@ class SensitivityManager:
         if self.owner.plot_signed_gradients:
             signed_total_map = _signed_total_sensitivity_map(gradient_maps)
             signed_total_path = f"{self.owner.plot_prefix}-total-signed.png"
-            vmin, vmax = self.symmetric_limits(signed_total_map)
+            vmin, vmax = self.robust_symmetric_limits(
+                signed_total_map,
+                self.owner.plot_clip_percentile,
+            )
 
             if projection is not None:
                 figure, axes = plt.subplots(figsize=(12, 5), subplot_kw={"projection": projection})
@@ -584,10 +636,25 @@ class SensitivityManager:
                     origin="upper",
                     extent=extent,
                     cmap="viridis",
+                    vmin=0.0,
+                    vmax=self.robust_positive_limit(
+                        np.abs(gradient_maps[index]),
+                        self.owner.plot_clip_percentile,
+                    ),
                     transform=data_crs,
                 )
             else:
-                image = axis.imshow(np.abs(gradient_maps[index]), origin="upper", extent=extent, cmap="viridis")
+                image = axis.imshow(
+                    np.abs(gradient_maps[index]),
+                    origin="upper",
+                    extent=extent,
+                    cmap="viridis",
+                    vmin=0.0,
+                    vmax=self.robust_positive_limit(
+                        np.abs(gradient_maps[index]),
+                        self.owner.plot_clip_percentile,
+                    ),
+                )
             axis.set_title(self.owner.ordering[index])
             axis.set_xlabel("Longitude")
             axis.set_ylabel("Latitude")
@@ -607,7 +674,10 @@ class SensitivityManager:
 
         if self.owner.plot_signed_gradients:
             signed_top_path = f"{self.owner.plot_prefix}-top-channels-signed.png"
-            signed_vmin, signed_vmax = self.symmetric_limits(gradient_maps[top_indices])
+            signed_vmin, signed_vmax = self.robust_symmetric_limits(
+                gradient_maps[top_indices],
+                self.owner.plot_clip_percentile,
+            )
 
             if projection is not None:
                 figure, axes = plt.subplots(

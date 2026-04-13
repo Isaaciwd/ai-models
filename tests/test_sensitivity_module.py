@@ -167,3 +167,86 @@ def test_configure_enables_sensitivity_when_config_path_is_set(tmp_path):
     assert owner.sensitivity is True
     assert owner.model_checkpointing is True
     assert owner.rollout_checkpointing is True
+
+
+def test_load_config_applies_plot_clip_percentile(tmp_path):
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_signed_gradients = False
+            self.plot_clip_percentile = 99.9
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+    manager.targets = [None]
+    manager.current_target = None
+
+    config_path = tmp_path / "sens.yaml"
+    config_path.write_text(
+        """
+plotting:
+  clip_percentile: 99.5
+""".strip()
+    )
+
+    manager.load_config(str(config_path))
+
+    assert np.isclose(owner.plot_clip_percentile, 99.5)
+
+
+def test_configure_rejects_invalid_plot_clip_percentile():
+    class Owner:
+        def __init__(self):
+            self.model_checkpointing = None
+            self.rollout_checkpointing = None
+            self.plot_sensitivity = None
+            self.plot_signed_gradients = False
+            self.plot_clip_percentile = 0.0
+            self.plot_top_k = 6
+            self.sensitivity_path = "sens.nc"
+            self.summary_path = None
+            self.plot_prefix = None
+            self.plot_area = None
+            self.sensitivity_metric = "mean-square"
+            self.target_field = None
+            self.target_param = None
+            self.target_level = None
+            self.target_area = None
+            self.sensitivity = True
+            self.sensitivity_config = None
+
+        def default_target(self):
+            return None
+
+        def config_targets(self, config):
+            return [None]
+
+    owner = Owner()
+    manager = SensitivityManager(owner=owner, model_name="x", default_sensitivity_path="sens.nc")
+
+    try:
+        manager.configure()
+    except ValueError as exc:
+        assert "plot-clip-percentile" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid clip percentile")
